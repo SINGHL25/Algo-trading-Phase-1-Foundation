@@ -1,0 +1,195 @@
+# ═══════════════════════════════════════════════════════════════════
+# config/strategies.yaml
+#
+# Master strategy configuration for the live trading orchestrator.
+#
+# Structure:
+#   orchestrator:   global settings (capital, risk, timing)
+#   strategies:     list of strategies — each is independently toggled
+#
+# Hot reload: POST /config/reload to apply changes without restart.
+# ═══════════════════════════════════════════════════════════════════
+
+orchestrator:
+  name: "NIFTY Algo Orchestrator"
+  version: "1.0"
+
+  capital:
+    total_inr: 500000            # total capital allocated to bot
+    reserve_pct: 10              # keep 10% as emergency buffer
+    # Effective capital = total * (1 - reserve_pct/100) = 450_000
+
+  risk:
+    max_risk_per_trade_pct: 2.0  # % of effective capital per trade
+    max_daily_loss_pct: 5.0      # halt trading if daily P&L < -(5% of capital)
+    max_open_positions: 5        # across ALL strategies
+    max_orders_per_minute: 10    # anti-spam guard
+    max_correlated_positions: 2  # max positions in same instrument
+    position_size_model: fixed_risk  # fixed_risk | fixed_units | kelly
+
+  timing:
+    market_open:           "09:15"
+    market_close:          "15:30"
+    no_new_positions_after: "15:00"
+    graceful_shutdown:     "15:20"   # send close signals
+    force_exit:            "15:25"   # market-order close everything
+    token_refresh:         "08:55"   # daily Kite token refresh
+    avoid_first_minutes: 5          # skip first 5 min after open
+    avoid_last_minutes: 10          # skip last 10 min before close
+
+  notifications:
+    on_entry: true
+    on_exit: true
+    on_sl_hit: true
+    on_daily_loss_halt: true
+    on_token_refresh: true
+    on_error: true
+
+
+# ─── Strategies ────────────────────────────────────────────────────
+#
+# Each strategy entry is identified by its `id` — this is the value
+# the TradingView alert sends in the `strategy_id` JSON field.
+#
+# enabled: false = signals received but NOT executed
+# dry_run:  true = signals executed in paper mode only (overrides global)
+
+strategies:
+
+  # ── Strategy 1: Opening Range Breakout (NIFTY intraday) ────────────
+  - id: ORB_NIFTY_15M
+    name: "Opening Range Breakout — NIFTY 15min"
+    enabled: true
+    dry_run: false   # inherits global DRY_RUN if not set here
+
+    instrument:
+      symbol: "NIFTY 50"
+      exchange: NSE
+      product: MIS             # intraday margin
+      lot_size: 1              # index → qty units (not lots)
+
+    entry:
+      order_type: MARKET
+      max_slippage_pct: 0.1    # reject if fill > 0.1% from signal price
+
+    exit:
+      take_profit_pct: 0.8     # close at +0.8% from entry
+      stop_loss_pct: 0.4       # close at -0.4% from entry
+      trailing_stop: true
+      trailing_atr_multiplier: 1.5
+
+    risk:
+      max_risk_per_trade_pct: 1.5   # override global
+      max_positions: 1              # only 1 ORB trade at a time
+      position_size_model: fixed_risk
+
+    filters:
+      min_iv: 10               # skip if NIFTY IV < 10%
+      max_iv: 60               # skip if NIFTY IV > 60% (panic days)
+      avoid_expiry_day: true
+
+
+  # ── Strategy 2: EMA Trend — BANKNIFTY ──────────────────────────────
+  - id: EMA_TREND_BNF
+    name: "EMA 20/50 Trend — BANKNIFTY 15min"
+    enabled: true
+    dry_run: false
+
+    instrument:
+      symbol: "NIFTY BANK"
+      exchange: NSE
+      product: MIS
+      lot_size: 1
+
+    entry:
+      order_type: MARKET
+      max_slippage_pct: 0.15
+
+    exit:
+      take_profit_pct: 1.2
+      stop_loss_pct: 0.6
+      trailing_stop: false
+
+    risk:
+      max_risk_per_trade_pct: 2.0
+      max_positions: 2
+      position_size_model: fixed_risk
+
+    filters:
+      avoid_expiry_day: true
+      min_adx: 20              # only trade when trending (ADX > 20)
+
+
+  # ── Strategy 3: Mean Reversion — NIFTY options ─────────────────────
+  - id: MR_NIFTY_OPTIONS
+    name: "Mean Reversion — NIFTY Options Straddle"
+    enabled: false             # disabled — enable after paper testing
+    dry_run: true
+
+    instrument:
+      symbol: "NIFTY 50"
+      exchange: NFO
+      product: MIS
+      lot_size: 50
+
+    entry:
+      order_type: LIMIT
+      limit_offset_pct: 0.2   # bid +0.2% for sells
+
+    exit:
+      take_profit_pct: 0.4
+      stop_loss_pct: 0.8
+
+    risk:
+      max_risk_per_trade_pct: 1.0
+      max_positions: 1
+      position_size_model: fixed_units
+      fixed_units: 1           # 1 lot
+
+    filters:
+      min_iv: 15
+      max_iv: 50
+      avoid_expiry_day: true
+
+
+  # ── Strategy 4: Breakout — RELIANCE equity ─────────────────────────
+  - id: BREAKOUT_RELIANCE
+    name: "52-Week High Breakout — RELIANCE"
+    enabled: true
+    dry_run: false
+
+    instrument:
+      symbol: "RELIANCE"
+      exchange: NSE
+      product: CNC             # delivery
+      lot_size: 1
+
+    entry:
+      order_type: LIMIT
+      limit_offset_pct: 0.05
+
+    exit:
+      take_profit_pct: 3.0
+      stop_loss_pct: 1.5
+      trailing_stop: true
+      trailing_atr_multiplier: 2.0
+
+    risk:
+      max_risk_per_trade_pct: 2.0
+      max_positions: 1
+      position_size_model: fixed_risk
+
+    filters:
+      min_volume_vs_avg: 1.5   # only trade if volume > 1.5x 20-day avg
+
+
+# ─── ML Filter integration ─────────────────────────────────────────
+# Optional: route signals through repo 19 ML filter before execution.
+# Set ml_filter.enabled: true and ml_filter.url to the signal server.
+
+ml_filter:
+  enabled: false
+  url: "http://localhost:5001/signal"
+  timeout_s: 3
+  on_timeout: pass             # pass | block — what to do if ML server is down
+  min_confidence: 0.60
